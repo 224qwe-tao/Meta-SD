@@ -1,0 +1,993 @@
+const fileInput = document.querySelector("#fileInput");
+const dropZone = document.querySelector("#dropZone");
+const results = document.querySelector("#results");
+const cards = document.querySelector("#cards");
+const statusBox = document.querySelector("#status");
+const copyAllBtn = document.querySelector("#copyAllBtn");
+const downloadAllBtn = document.querySelector("#downloadAllBtn");
+const clearBtn = document.querySelector("#clearBtn");
+const themeBtn = document.querySelector("#themeBtn");
+const template = document.querySelector("#resultTemplate");
+
+let allResults = [];
+
+const decoderUtf8 = new TextDecoder("utf-8", { fatal: false });
+const decoderLatin1 = new TextDecoder("iso-8859-1", { fatal: false });
+
+themeBtn.addEventListener("click", () => {
+  document.body.classList.toggle("light");
+  localStorage.setItem("theme", document.body.classList.contains("light") ? "light" : "dark");
+});
+
+if (localStorage.getItem("theme") === "light") {
+  document.body.classList.add("light");
+}
+
+dropZone.addEventListener("click", () => fileInput.click());
+dropZone.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") fileInput.click();
+});
+
+dropZone.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  dropZone.classList.add("drag-over");
+});
+
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag-over"));
+
+dropZone.addEventListener("drop", (event) => {
+  event.preventDefault();
+  dropZone.classList.remove("drag-over");
+  handleFiles([...event.dataTransfer.files]);
+});
+
+fileInput.addEventListener("change", (event) => handleFiles([...event.target.files]));
+
+clearBtn.addEventListener("click", () => {
+  allResults = [];
+  cards.innerHTML = "";
+  results.classList.add("hidden");
+  setStatus("", true);
+  fileInput.value = "";
+});
+
+copyAllBtn.addEventListener("click", async () => {
+  await copyText(JSON.stringify(allResults, null, 2));
+  setStatus("已複製全部 JSON。");
+});
+
+downloadAllBtn.addEventListener("click", () => {
+  const blob = new Blob([JSON.stringify(allResults, null, 2)], { type: "application/json" });
+  downloadBlob(blob, "metadata-results.json");
+});
+
+async function handleFiles(files) {
+  const imageFiles = files.filter((file) => file.type.startsWith("image/") || /\.(png|jpe?g|webp)$/i.test(file.name));
+  if (!imageFiles.length) {
+    setStatus("請選擇 PNG、JPG 或 WebP 圖片。");
+    return;
+  }
+
+  results.classList.remove("hidden");
+  setStatus(`正在讀取 ${imageFiles.length} 張圖片...`);
+
+  for (const file of imageFiles) {
+    try {
+      const result = await readImageMetadata(file);
+      allResults.push(result);
+      renderResult(result, file);
+    } catch (error) {
+      console.error(error);
+      const failedResult = {
+        file: file.name,
+        size: file.size,
+        mime: file.type,
+        error: error.message || String(error),
+      };
+      allResults.push(failedResult);
+      renderError(failedResult, file);
+    }
+  }
+
+  setStatus(`完成。已讀取 ${imageFiles.length} 張圖片。`);
+}
+
+async function readImageMetadata(file) {
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  const kind = detectImageType(bytes);
+  let extracted = {
+    format: kind,
+    metadata: {},
+    chunks: [],
+    warnings: [],
+  };
+
+  if (kind === "PNG") {
+    extracted = await parsePng(bytes);
+  } else if (kind === "JPEG") {
+    extracted = parseJpeg(bytes);
+  } else if (kind === "WEBP") {
+    extracted = parseWebp(bytes);
+  } else {
+    extracted.warnings.push("未知圖片格式，只會嘗試掃描可見文字。");
+  }
+
+  extracted.textScan = scanReadableText(bytes);
+  const analysis = analyzeMetadata(extracted.metadata, extracted.textScan);
+
+  return {
+    file: file.name,
+    size: file.size,
+    mime: file.type || "unknown",
+    format: kind,
+    imagePreviewUrl: URL.createObjectURL(file),
+    detectedTool: analysis.detectedTool,
+    summary: analysis.summary,
+    metadata: extracted.metadata,
+    chunks: extracted.chunks,
+    warnings: extracted.warnings,
+    textScan: extracted.textScan.slice(0, 60),
+  };
+}
+
+function detectImageType(bytes) {
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) return "PNG";
+
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "JPEG";
+
+  if (
+    bytes.length >= 12 &&
+    ascii(bytes, 0, 4) === "RIFF" &&
+    ascii(bytes, 8, 4) === "WEBP"
+  ) return "WEBP";
+
+  return "UNKNOWN";
+}
+
+async function parsePng(bytes) {
+  const metadata = {};
+  const chunks = [];
+  const warnings = [];
+
+  let offset = 8;
+  while (offset + 12 <= bytes.length) {
+    const length = readUint32BE(bytes, offset);
+    const type = ascii(bytes, offset + 4, 4);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+
+    if (dataEnd + 4 > bytes.length) {
+      warnings.push(`PNG chunk ${type} 長度不正常，已停止讀取。`);
+      break;
+    }
+
+    const data = bytes.slice(dataStart, dataEnd);
+    chunks.push({ type, length });
+
+    try {
+      if (type === "tEXt") {
+        const { key, value } = parseTextChunk(data);
+        if (key) metadata[key] = value;
+      } else if (type === "zTXt") {
+        const { key, value, warning } = await parseZtxtChunk(data);
+        if (key) metadata[key] = value;
+        if (warning) warnings.push(warning);
+      } else if (type === "iTXt") {
+        const { key, value, warning } = await parseItxtChunk(data);
+        if (key) metadata[key] = value;
+        if (warning) warnings.push(warning);
+      }
+    } catch (error) {
+      warnings.push(`${type} 讀取失敗：${error.message || error}`);
+    }
+
+    offset = dataEnd + 4;
+    if (type === "IEND") break;
+  }
+
+  return { format: "PNG", metadata, chunks, warnings };
+}
+
+function parseTextChunk(data) {
+  const zero = data.indexOf(0);
+  if (zero < 0) return { key: "", value: decoderLatin1.decode(data) };
+  return {
+    key: decoderLatin1.decode(data.slice(0, zero)),
+    value: decoderLatin1.decode(data.slice(zero + 1)),
+  };
+}
+
+async function parseZtxtChunk(data) {
+  const zero = data.indexOf(0);
+  if (zero < 0) return { key: "", value: "", warning: "zTXt chunk 缺少 key separator。" };
+
+  const key = decoderLatin1.decode(data.slice(0, zero));
+  const compressionMethod = data[zero + 1];
+  const compressed = data.slice(zero + 2);
+
+  if (compressionMethod !== 0) {
+    return { key, value: "", warning: `${key}: 不支援的 zTXt compression method ${compressionMethod}。` };
+  }
+
+  const inflated = await inflateBytes(compressed);
+  return { key, value: decoderLatin1.decode(inflated) };
+}
+
+async function parseItxtChunk(data) {
+  let offset = 0;
+  const keyEnd = data.indexOf(0, offset);
+  if (keyEnd < 0) return { key: "", value: "", warning: "iTXt chunk 缺少 key separator。" };
+
+  const key = decoderLatin1.decode(data.slice(offset, keyEnd));
+  offset = keyEnd + 1;
+  const compressedFlag = data[offset++];
+  const compressionMethod = data[offset++];
+
+  const langEnd = data.indexOf(0, offset);
+  if (langEnd < 0) return { key, value: "", warning: `${key}: iTXt language tag 不完整。` };
+  offset = langEnd + 1;
+
+  const translatedEnd = data.indexOf(0, offset);
+  if (translatedEnd < 0) return { key, value: "", warning: `${key}: iTXt translated keyword 不完整。` };
+  offset = translatedEnd + 1;
+
+  let textData = data.slice(offset);
+  if (compressedFlag === 1) {
+    if (compressionMethod !== 0) {
+      return { key, value: "", warning: `${key}: 不支援的 iTXt compression method ${compressionMethod}。` };
+    }
+    textData = await inflateBytes(textData);
+  }
+
+  return { key, value: decoderUtf8.decode(textData) };
+}
+
+async function inflateBytes(bytes) {
+  if (!("DecompressionStream" in window)) {
+    throw new Error("此瀏覽器不支援 DecompressionStream，無法解壓縮 zTXt/iTXt。建議使用新版 Chrome / Edge / Firefox。");
+  }
+
+  const formats = ["deflate", "deflate-raw"];
+  let lastError = null;
+
+  for (const format of formats) {
+    try {
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream(format));
+      const buffer = await new Response(stream).arrayBuffer();
+      return new Uint8Array(buffer);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error("解壓縮失敗。");
+}
+
+function parseJpeg(bytes) {
+  const metadata = {};
+  const chunks = [];
+  const warnings = [];
+
+  let offset = 2;
+  while (offset + 4 < bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      offset++;
+      continue;
+    }
+
+    while (bytes[offset] === 0xff) offset++;
+    const marker = bytes[offset++];
+    if (marker === 0xd9 || marker === 0xda) break;
+
+    const length = readUint16BE(bytes, offset);
+    const dataStart = offset + 2;
+    const dataEnd = dataStart + length - 2;
+    if (length < 2 || dataEnd > bytes.length) {
+      warnings.push("JPEG segment 長度不正常，已停止讀取。");
+      break;
+    }
+
+    const name = `APP${marker - 0xe0}`;
+    if (marker >= 0xe0 && marker <= 0xef) {
+      chunks.push({ type: name, length });
+      const segment = bytes.slice(dataStart, dataEnd);
+
+      if (marker === 0xe1 && startsWithAscii(segment, "Exif\0\0")) {
+        Object.assign(metadata, parseExif(segment.slice(6), warnings));
+      } else if (marker === 0xe1 && startsWithAscii(segment, "http://ns.adobe.com/xap/1.0/\0")) {
+        metadata.XMP = decoderUtf8.decode(segment.slice(29)).trim();
+      } else {
+        const text = scanReadableText(segment).join("\n");
+        if (text.length > 80) metadata[name] = text;
+      }
+    }
+
+    offset = dataEnd;
+  }
+
+  return { format: "JPEG", metadata, chunks, warnings };
+}
+
+function parseWebp(bytes) {
+  const metadata = {};
+  const chunks = [];
+  const warnings = [];
+
+  let offset = 12;
+  while (offset + 8 <= bytes.length) {
+    const id = ascii(bytes, offset, 4);
+    const size = readUint32LE(bytes, offset + 4);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + size;
+
+    if (dataEnd > bytes.length) {
+      warnings.push(`WebP chunk ${id} 長度不正常，已停止讀取。`);
+      break;
+    }
+
+    const data = bytes.slice(dataStart, dataEnd);
+    chunks.push({ type: id, length: size });
+
+    if (id === "EXIF") {
+      Object.assign(metadata, parseExif(data, warnings));
+    } else if (id === "XMP ") {
+      metadata.XMP = decoderUtf8.decode(data).trim();
+    } else {
+      const text = scanReadableText(data).join("\n");
+      if (text.length > 80 && /prompt|workflow|parameters|seed|sampler|negative/i.test(text)) {
+        metadata[id] = text;
+      }
+    }
+
+    offset = dataEnd + (size % 2);
+  }
+
+  return { format: "WEBP", metadata, chunks, warnings };
+}
+
+function parseExif(tiff, warnings) {
+  const metadata = {};
+  if (tiff.length < 8) return metadata;
+
+  const endianMark = ascii(tiff, 0, 2);
+  const little = endianMark === "II";
+  if (!little && endianMark !== "MM") {
+    warnings.push("EXIF TIFF header 不正確。");
+    return metadata;
+  }
+
+  const read16 = (offset) => little ? readUint16LE(tiff, offset) : readUint16BE(tiff, offset);
+  const read32 = (offset) => little ? readUint32LE(tiff, offset) : readUint32BE(tiff, offset);
+
+  const magic = read16(2);
+  if (magic !== 42) {
+    warnings.push("EXIF magic number 不正確。");
+    return metadata;
+  }
+
+  const ifd0Offset = read32(4);
+  const visited = new Set();
+
+  const parseIfd = (offset, prefix) => {
+    if (visited.has(offset) || offset + 2 > tiff.length) return;
+    visited.add(offset);
+
+    const count = read16(offset);
+    for (let i = 0; i < count; i++) {
+      const entry = offset + 2 + i * 12;
+      if (entry + 12 > tiff.length) break;
+
+      const tag = read16(entry);
+      const type = read16(entry + 2);
+      const itemCount = read32(entry + 4);
+      const valueOffset = entry + 8;
+
+      if (tag === 0x8769) {
+        const exifOffset = readValueOffset(tiff, valueOffset, 4, little);
+        parseIfd(exifOffset, "EXIF");
+        continue;
+      }
+
+      const tagName = exifTagName(tag);
+      if (!tagName) continue;
+
+      const value = readExifValue(tiff, type, itemCount, valueOffset, little);
+      if (value !== null && value !== "") {
+        metadata[prefix ? `${prefix}.${tagName}` : tagName] = value;
+      }
+    }
+  };
+
+  parseIfd(ifd0Offset, "");
+  return metadata;
+}
+
+function exifTagName(tag) {
+  const map = {
+    0x010e: "ImageDescription",
+    0x0131: "Software",
+    0x013b: "Artist",
+    0x8298: "Copyright",
+    0x9003: "DateTimeOriginal",
+    0x9286: "UserComment",
+    0x9c9c: "XPComment",
+    0x9c9b: "XPTitle",
+    0x9c9d: "XPAuthor",
+    0x9c9e: "XPKeywords",
+    0x9c9f: "XPSubject",
+  };
+  return map[tag] || "";
+}
+
+function readExifValue(tiff, type, count, valueOffset, little) {
+  const typeSize = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1 };
+  const size = (typeSize[type] || 1) * count;
+  let data;
+
+  if (size <= 4) {
+    data = tiff.slice(valueOffset, valueOffset + size);
+  } else {
+    const offset = readValueOffset(tiff, valueOffset, 4, little);
+    if (offset + size > tiff.length) return null;
+    data = tiff.slice(offset, offset + size);
+  }
+
+  if (type === 2) return stripNull(decoderUtf8.decode(data));
+  if (type === 7) return decodeUndefinedExif(data);
+  if (type === 1) return [...data].join(", ");
+  if (type === 3) return readShortArray(data, little).join(", ");
+  if (type === 4) return readLongArray(data, little).join(", ");
+  return scanReadableText(data).join("\n") || null;
+}
+
+function decodeUndefinedExif(data) {
+  const prefix = ascii(data, 0, Math.min(8, data.length));
+  const body = data.slice(8);
+
+  if (prefix.startsWith("ASCII")) return stripNull(decoderUtf8.decode(body));
+  if (prefix.startsWith("UNICODE")) {
+    // EXIF UserComment commonly uses UCS-2. Try both endian styles and keep the cleaner result.
+    const be = decodeUtf16(body, false);
+    const le = decodeUtf16(body, true);
+    return printableScore(le) > printableScore(be) ? le : be;
+  }
+
+  const utf8 = stripNull(decoderUtf8.decode(data));
+  if (utf8 && /prompt|negative|steps|seed|sampler|model|workflow|ComfyUI/i.test(utf8)) return utf8;
+  return scanReadableText(data).join("\n");
+}
+
+function decodeUtf16(bytes, little) {
+  const chars = [];
+  for (let i = 0; i + 1 < bytes.length; i += 2) {
+    const code = little ? bytes[i] | (bytes[i + 1] << 8) : (bytes[i] << 8) | bytes[i + 1];
+    if (code === 0) continue;
+    chars.push(String.fromCharCode(code));
+  }
+  return stripNull(chars.join(""));
+}
+
+function printableScore(text) {
+  return (text.match(/[a-zA-Z0-9\u4e00-\u9fff.,:;_()[\]{}<>\-\s]/g) || []).length;
+}
+
+function analyzeMetadata(metadata, textScan = []) {
+  const keys = Object.keys(metadata);
+  const summary = {
+    sdWebui: null,
+    comfyui: null,
+    general: {},
+    warnings: [],
+  };
+
+  const rawJoined = [
+    ...Object.values(metadata).map((v) => String(v)),
+    ...textScan,
+  ].join("\n");
+
+  let detectedTool = "未知 / 未找到 AI metadata";
+
+  if ("parameters" in metadata || /Negative prompt:|Steps:\s*\d+|Sampler:|CFG scale:|Seed:/i.test(rawJoined)) {
+    detectedTool = "Stable Diffusion WebUI / Forge";
+    const parameters = metadata.parameters || findLikelySdParameters(rawJoined);
+    summary.sdWebui = parseSdParameters(parameters);
+  }
+
+  if ("workflow" in metadata || "prompt" in metadata || /"class_type"\s*:|"KSampler"|"CLIPTextEncode"/.test(rawJoined)) {
+    detectedTool = detectedTool.includes("Stable") ? "SD WebUI + ComfyUI mixed metadata" : "ComfyUI";
+    summary.comfyui = parseComfyMetadata(metadata);
+  }
+
+  for (const [key, value] of Object.entries(metadata)) {
+    if (["parameters", "prompt", "workflow"].includes(key)) continue;
+    if (/software|description|comment|xmp|author|copyright|datetime/i.test(key)) {
+      summary.general[key] = value;
+    }
+  }
+
+  return { detectedTool, summary };
+}
+
+function findLikelySdParameters(text) {
+  const markerIndex = text.search(/Negative prompt:|Steps:\s*\d+|Sampler:|CFG scale:|Seed:/i);
+  if (markerIndex < 0) return text;
+  const start = Math.max(0, markerIndex - 2000);
+  return text.slice(start, markerIndex + 4000);
+}
+
+function parseSdParameters(parameters = "") {
+  const result = {
+    prompt: "",
+    negativePrompt: "",
+    settings: {},
+    raw: parameters,
+  };
+
+  if (!parameters) return result;
+
+  const negativeMarker = "Negative prompt:";
+  const stepsRegex = /\n?Steps:\s*/i;
+  const negativeIndex = parameters.indexOf(negativeMarker);
+  const stepsMatch = parameters.match(stepsRegex);
+  const stepsIndex = stepsMatch ? stepsMatch.index : -1;
+
+  if (negativeIndex >= 0) {
+    result.prompt = parameters.slice(0, negativeIndex).trim();
+    if (stepsIndex >= 0) {
+      result.negativePrompt = parameters.slice(negativeIndex + negativeMarker.length, stepsIndex).trim();
+    } else {
+      result.negativePrompt = parameters.slice(negativeIndex + negativeMarker.length).trim();
+    }
+  } else if (stepsIndex >= 0) {
+    result.prompt = parameters.slice(0, stepsIndex).trim();
+  } else {
+    result.prompt = parameters.trim();
+  }
+
+  const settingsText = stepsIndex >= 0 ? parameters.slice(stepsIndex).trim() : "";
+  if (settingsText) {
+    for (const part of splitSettingsLine(settingsText)) {
+      const colon = part.indexOf(":");
+      if (colon > 0) {
+        const key = part.slice(0, colon).trim();
+        const value = part.slice(colon + 1).trim();
+        if (key && value) result.settings[key] = value;
+      }
+    }
+  }
+
+  return result;
+}
+
+function splitSettingsLine(text) {
+  const normalized = text.replace(/^\s*Steps:/i, "Steps:");
+  const parts = [];
+  let current = "";
+  let depth = 0;
+
+  for (const char of normalized) {
+    if ("([{<".includes(char)) depth++;
+    if (")]}>".includes(char) && depth > 0) depth--;
+
+    if (char === "," && depth === 0) {
+      parts.push(current.trim());
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+function parseComfyMetadata(metadata) {
+  const result = {
+    textPrompts: [],
+    samplers: [],
+    models: [],
+    rawPromptJson: null,
+    rawWorkflowJson: null,
+  };
+
+  const promptJson = safeJson(metadata.prompt);
+  const workflowJson = safeJson(metadata.workflow);
+  result.rawPromptJson = promptJson;
+  result.rawWorkflowJson = workflowJson;
+
+  if (promptJson && typeof promptJson === "object") {
+    for (const [nodeId, node] of Object.entries(promptJson)) {
+      const classType = node?.class_type || node?._meta?.title || "Unknown";
+      const inputs = node?.inputs || {};
+
+      if (typeof inputs.text === "string") {
+        result.textPrompts.push({
+          node: nodeId,
+          type: classType,
+          text: inputs.text,
+        });
+      }
+
+      const modelKeys = ["ckpt_name", "vae_name", "lora_name", "control_net_name", "model_name", "unet_name", "clip_name"];
+      for (const key of modelKeys) {
+        if (typeof inputs[key] === "string") {
+          result.models.push({
+            node: nodeId,
+            type: classType,
+            key,
+            value: inputs[key],
+          });
+        }
+      }
+
+      if (/sampler|ksampler/i.test(classType)) {
+        result.samplers.push({
+          node: nodeId,
+          type: classType,
+          seed: inputs.seed,
+          steps: inputs.steps,
+          cfg: inputs.cfg,
+          sampler: inputs.sampler_name,
+          scheduler: inputs.scheduler,
+          denoise: inputs.denoise,
+        });
+      }
+    }
+  }
+
+  if (workflowJson?.nodes && Array.isArray(workflowJson.nodes)) {
+    for (const node of workflowJson.nodes) {
+      const type = node.type || node.title || "Unknown";
+      const values = node.widgets_values || [];
+      if (/CLIPTextEncode|Prompt|Text/i.test(type)) {
+        const textValues = values.filter((value) => typeof value === "string" && value.length > 5);
+        for (const text of textValues) {
+          if (!result.textPrompts.some((item) => item.text === text)) {
+            result.textPrompts.push({
+              node: String(node.id ?? "?"),
+              type,
+              text,
+            });
+          }
+        }
+      }
+
+      if (/Checkpoint|LoRA|Lora|VAE|UNET|CLIP/i.test(type)) {
+        for (const value of values) {
+          if (typeof value === "string" && /\.(safetensors|ckpt|pt|bin)$/i.test(value)) {
+            result.models.push({
+              node: String(node.id ?? "?"),
+              type,
+              key: "widget",
+              value,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+function renderResult(result) {
+  const node = template.content.cloneNode(true);
+  const card = node.querySelector(".result-card");
+  const preview = node.querySelector(".preview");
+  const fileName = node.querySelector(".file-name");
+  const fileDetails = node.querySelector(".file-details");
+  const detected = node.querySelector(".detected");
+
+  preview.src = result.imagePreviewUrl;
+  fileName.textContent = result.file;
+  fileDetails.textContent = `${result.format} · ${formatBytes(result.size)} · ${result.mime}`;
+  detected.textContent = result.detectedTool;
+
+  renderSummary(node.querySelector('[data-panel="summary"]'), result);
+  renderRaw(node.querySelector('[data-panel="raw"]'), result.metadata, result);
+  renderJson(node.querySelector('[data-panel="json"]'), result);
+
+  for (const tab of node.querySelectorAll(".tab")) {
+    tab.addEventListener("click", () => activateTab(card, tab.dataset.tab));
+  }
+
+  cards.prepend(node);
+}
+
+function renderError(result, file) {
+  const wrapper = document.createElement("article");
+  wrapper.className = "result-card";
+  wrapper.innerHTML = `
+    <div class="result-header">
+      <div class="preview"></div>
+      <div class="file-meta">
+        <h3 class="file-name"></h3>
+        <p class="file-details"></p>
+        <span class="badge detected">讀取失敗</span>
+      </div>
+    </div>
+    <div class="tab-panel active">
+      <div class="info-box">
+        <h4>Error</h4>
+        <pre></pre>
+      </div>
+    </div>
+  `;
+  wrapper.querySelector(".file-name").textContent = file.name;
+  wrapper.querySelector(".file-details").textContent = `${formatBytes(file.size)} · ${file.type || "unknown"}`;
+  wrapper.querySelector("pre").textContent = result.error;
+  cards.prepend(wrapper);
+}
+
+function renderSummary(container, result) {
+  const summary = result.summary || {};
+  const blocks = [];
+
+  if (result.warnings?.length) {
+    blocks.push(infoBox("注意", result.warnings.join("\n")));
+  }
+
+  if (summary.sdWebui) {
+    const sd = summary.sdWebui;
+    blocks.push(infoBox("Positive Prompt", sd.prompt || "沒有找到"));
+    blocks.push(infoBox("Negative Prompt", sd.negativePrompt || "沒有找到"));
+    blocks.push(settingsBox("Generation Settings", sd.settings));
+
+    if (sd.raw && (!sd.prompt && !Object.keys(sd.settings).length)) {
+      blocks.push(infoBox("Raw parameters", sd.raw));
+    }
+  }
+
+  if (summary.comfyui) {
+    const comfy = summary.comfyui;
+
+    if (comfy.textPrompts.length) {
+      blocks.push(listBox("ComfyUI Text Prompts", comfy.textPrompts.map((item) =>
+        `Node ${item.node} · ${item.type}\n${item.text}`
+      )));
+    }
+
+    if (comfy.samplers.length) {
+      blocks.push(listBox("ComfyUI Samplers", comfy.samplers.map((item) =>
+        Object.entries(item)
+          .filter(([, value]) => value !== undefined && value !== null && value !== "")
+          .map(([key, value]) => `${key}: ${value}`)
+          .join("\n")
+      )));
+    }
+
+    if (comfy.models.length) {
+      blocks.push(listBox("ComfyUI Models / LoRA / VAE", comfy.models.map((item) =>
+        `Node ${item.node} · ${item.type}\n${item.key}: ${item.value}`
+      )));
+    }
+
+    if (!comfy.textPrompts.length && !comfy.samplers.length && !comfy.models.length) {
+      blocks.push(infoBox("ComfyUI", "找到 prompt / workflow metadata，但未能自動整理。請查看 Raw metadata 或 JSON。"));
+    }
+  }
+
+  const general = summary.general || {};
+  if (Object.keys(general).length) {
+    blocks.push(settingsBox("General Metadata", general));
+  }
+
+  if (!blocks.length) {
+    blocks.push(infoBox("沒有找到常見 AI metadata", "可以查看 Raw metadata 或 JSON。某些圖片在壓縮、截圖、社交平台上傳後，metadata 可能已被移除。"));
+  }
+
+  container.innerHTML = `<div class="summary-grid">${blocks.join("")}</div>`;
+}
+
+function infoBox(title, value) {
+  return `
+    <section class="info-box">
+      <h4>${escapeHtml(title)}</h4>
+      <div class="value-block">${escapeHtml(value)}</div>
+    </section>
+  `;
+}
+
+function listBox(title, items) {
+  return `
+    <section class="info-box">
+      <h4>${escapeHtml(title)}</h4>
+      ${items.map((item) => `<div class="value-block">${escapeHtml(item)}</div>`).join("")}
+    </section>
+  `;
+}
+
+function settingsBox(title, settings) {
+  const entries = Object.entries(settings || {});
+  if (!entries.length) return infoBox(title, "沒有找到");
+  return `
+    <section class="info-box">
+      <h4>${escapeHtml(title)}</h4>
+      <table class="settings-table">
+        <tbody>
+          ${entries.map(([key, value]) => `
+            <tr>
+              <th>${escapeHtml(key)}</th>
+              <td>${escapeHtml(String(value))}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </section>
+  `;
+}
+
+function renderRaw(container, metadata, result) {
+  const entries = Object.entries(metadata || {});
+  if (!entries.length) {
+    container.innerHTML = `<div class="info-box"><h4>Raw metadata</h4><p>沒有找到 raw metadata。</p></div>`;
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="kv-list">
+      ${entries.map(([key, value], index) => `
+        <section class="kv-item">
+          <div class="kv-head">
+            <strong>${escapeHtml(key)}</strong>
+            <button type="button" data-copy-index="${index}">複製</button>
+          </div>
+          <pre class="kv-value">${escapeHtml(formatMaybeJson(value))}</pre>
+        </section>
+      `).join("")}
+      <section class="info-box">
+        <h4>Chunks / Segments</h4>
+        <pre>${escapeHtml(JSON.stringify(result.chunks || [], null, 2))}</pre>
+      </section>
+    </div>
+  `;
+
+  container.querySelectorAll("[data-copy-index]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const [key, value] = entries[Number(button.dataset.copyIndex)];
+      await copyText(String(value));
+      setStatus(`已複製 ${key}。`);
+    });
+  });
+}
+
+function renderJson(container, result) {
+  container.innerHTML = `<pre>${escapeHtml(JSON.stringify(result, null, 2))}</pre>`;
+}
+
+function activateTab(card, tabName) {
+  card.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.tab === tabName));
+  card.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === tabName));
+}
+
+function safeJson(value) {
+  if (typeof value !== "string") return value || null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function formatMaybeJson(value) {
+  if (typeof value !== "string") return JSON.stringify(value, null, 2);
+  const parsed = safeJson(value);
+  return parsed ? JSON.stringify(parsed, null, 2) : value;
+}
+
+function scanReadableText(bytes) {
+  const text = decoderUtf8.decode(bytes);
+  const matches = text.match(/[ -~\u00a0-\uffff]{20,}/g) || [];
+  return [...new Set(matches.map((item) => stripNull(item).trim()).filter(Boolean))]
+    .filter((item) => /prompt|negative|steps|seed|sampler|model|workflow|ComfyUI|parameters|cfg|checkpoint|lora/i.test(item))
+    .slice(0, 100);
+}
+
+function setStatus(message, hide = false) {
+  statusBox.textContent = message;
+  statusBox.classList.toggle("hidden", hide || !message);
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const area = document.createElement("textarea");
+  area.value = text;
+  document.body.appendChild(area);
+  area.select();
+  document.execCommand("copy");
+  area.remove();
+}
+
+function downloadBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return "unknown size";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = bytes;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit++;
+  }
+  return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function ascii(bytes, offset, length) {
+  return String.fromCharCode(...bytes.slice(offset, offset + length));
+}
+
+function startsWithAscii(bytes, text) {
+  return ascii(bytes, 0, text.length) === text;
+}
+
+function stripNull(text) {
+  return String(text).replace(/\0/g, "").trim();
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function readUint16BE(bytes, offset) {
+  return (bytes[offset] << 8) | bytes[offset + 1];
+}
+
+function readUint16LE(bytes, offset) {
+  return bytes[offset] | (bytes[offset + 1] << 8);
+}
+
+function readUint32BE(bytes, offset) {
+  return ((bytes[offset] << 24) >>> 0) + (bytes[offset + 1] << 16) + (bytes[offset + 2] << 8) + bytes[offset + 3];
+}
+
+function readUint32LE(bytes, offset) {
+  return (bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | ((bytes[offset + 3] << 24) >>> 0)) >>> 0;
+}
+
+function readValueOffset(bytes, offset, size, little) {
+  if (size === 2) return little ? readUint16LE(bytes, offset) : readUint16BE(bytes, offset);
+  return little ? readUint32LE(bytes, offset) : readUint32BE(bytes, offset);
+}
+
+function readShortArray(data, little) {
+  const values = [];
+  for (let i = 0; i + 1 < data.length; i += 2) {
+    values.push(little ? readUint16LE(data, i) : readUint16BE(data, i));
+  }
+  return values;
+}
+
+function readLongArray(data, little) {
+  const values = [];
+  for (let i = 0; i + 3 < data.length; i += 4) {
+    values.push(little ? readUint32LE(data, i) : readUint32BE(data, i));
+  }
+  return values;
+}

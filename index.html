@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>SD & ComfyUI Metadata Viewer</title>
+  <meta name="description" content="Local browser tool for reading Stable Diffusion WebUI and ComfyUI image metadata." />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="app">
+    <section class="hero">
+      <div>
+        <p class="eyebrow">Local · No upload · GitHub Pages ready</p>
+        <h1>SD & ComfyUI 圖片 Metadata 讀取器</h1>
+        <p class="subtitle">
+          上傳 PNG / JPG / WebP 圖片，在瀏覽器本地讀取 Stable Diffusion WebUI、Forge、ComfyUI 常見 metadata。
+        </p>
+      </div>
+      <div class="hero-actions">
+        <button id="themeBtn" class="ghost-btn" type="button">切換主題</button>
+        <a class="ghost-btn" href="#guide">使用方法</a>
+      </div>
+    </section>
+
+    <section id="dropZone" class="drop-zone" tabindex="0">
+      <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" multiple />
+      <div class="drop-content">
+        <div class="upload-icon">⬆</div>
+        <h2>拖放圖片到這裡</h2>
+        <p>或點擊選擇圖片。資料只會在你的瀏覽器內讀取，不會上傳到伺服器。</p>
+      </div>
+    </section>
+
+    <section id="status" class="status hidden" aria-live="polite"></section>
+
+    <section id="results" class="results hidden">
+      <div class="toolbar">
+        <h2>讀取結果</h2>
+        <div class="toolbar-buttons">
+          <button id="copyAllBtn" type="button">複製全部 JSON</button>
+          <button id="downloadAllBtn" type="button">下載 JSON</button>
+          <button id="clearBtn" type="button" class="danger">清除</button>
+        </div>
+      </div>
+      <div id="cards" class="cards"></div>
+    </section>
+
+    <section id="guide" class="guide">
+      <h2>可讀取的常見資料</h2>
+      <div class="guide-grid">
+        <article>
+          <h3>Stable Diffusion WebUI / Forge</h3>
+          <p>常見 PNG metadata key 是 <code>parameters</code>。本工具會拆出 prompt、negative prompt、steps、sampler、seed、model 等資料。</p>
+        </article>
+        <article>
+          <h3>ComfyUI</h3>
+          <p>常見 PNG metadata key 是 <code>prompt</code> 和 <code>workflow</code>。本工具會顯示 workflow JSON，並嘗試整理 node 內的文字 prompt、sampler、checkpoint、LoRA。</p>
+        </article>
+        <article>
+          <h3>JPG / WebP</h3>
+          <p>會嘗試讀取 EXIF、XMP 和可見文字。不同軟件保存方式不同，所以 PNG 最穩定。</p>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <template id="resultTemplate">
+    <article class="result-card">
+      <div class="result-header">
+        <img class="preview" alt="image preview" />
+        <div class="file-meta">
+          <h3 class="file-name"></h3>
+          <p class="file-details"></p>
+          <span class="badge detected"></span>
+        </div>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button type="button" class="tab active" data-tab="summary">整理結果</button>
+        <button type="button" class="tab" data-tab="raw">Raw metadata</button>
+        <button type="button" class="tab" data-tab="json">JSON</button>
+      </div>
+
+      <div class="tab-panel active" data-panel="summary"></div>
+      <div class="tab-panel" data-panel="raw"></div>
+      <div class="tab-panel" data-panel="json"></div>
+    </article>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>
