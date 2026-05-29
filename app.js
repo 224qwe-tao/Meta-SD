@@ -407,6 +407,8 @@ function parseExif(tiff, warnings) {
 function exifTagName(tag) {
   const map = {
     0x010e: "ImageDescription",
+    0x010f: "Make",
+    0x0110: "Model",
     0x0131: "Software",
     0x013b: "Artist",
     0x8298: "Copyright",
@@ -474,11 +476,9 @@ function printableScore(text) {
 }
 
 function analyzeMetadata(metadata, textScan = []) {
-  const keys = Object.keys(metadata);
   const summary = {
     sdWebui: null,
-    comfyui: null,
-    general: {},
+    requested: extractRequestedMetadata(metadata, textScan),
     warnings: [],
   };
 
@@ -495,19 +495,283 @@ function analyzeMetadata(metadata, textScan = []) {
     summary.sdWebui = parseSdParameters(parameters);
   }
 
-  if ("workflow" in metadata || "prompt" in metadata || /"class_type"\s*:|"KSampler"|"CLIPTextEncode"/.test(rawJoined)) {
-    detectedTool = detectedTool.includes("Stable") ? "SD WebUI + ComfyUI mixed metadata" : "ComfyUI";
-    summary.comfyui = parseComfyMetadata(metadata);
-  }
-
-  for (const [key, value] of Object.entries(metadata)) {
-    if (["parameters", "prompt", "workflow"].includes(key)) continue;
-    if (/software|description|comment|xmp|author|copyright|datetime/i.test(key)) {
-      summary.general[key] = value;
-    }
+  if (requestedHasData(summary.requested) || /"class_type"\s*:|"KSampler"|"generation_data"|ComfyUI/i.test(rawJoined)) {
+    detectedTool = detectedTool.includes("Stable") ? "SD WebUI + ComfyUI / generation_data" : "ComfyUI / generation_data";
   }
 
   return { detectedTool, summary };
+}
+
+function requestedHasData(requested = {}) {
+  return Boolean(
+    requested.generationData ||
+    requested.ksamplers?.length ||
+    requested.upscaleModelLoaders?.length ||
+    requested.imageScales?.length
+  );
+}
+
+function extractRequestedMetadata(metadata, textScan = []) {
+  const result = {
+    ksamplers: [],
+    upscaleModelLoaders: [],
+    imageScales: [],
+    generationData: null,
+    sourceKeys: [],
+  };
+
+  const seen = {
+    KSampler: new Set(),
+    UpscaleModelLoader: new Set(),
+    ImageScale: new Set(),
+  };
+
+  const candidates = collectJsonCandidates(metadata, textScan);
+  for (const candidate of candidates) {
+    const generationData = findGenerationData(candidate.value);
+    if (generationData && !result.generationData) {
+      result.generationData = sanitizeGenerationData(generationData);
+      result.sourceKeys.push(candidate.source);
+    }
+
+    collectRequestedComfyNodes(candidate.value, result, candidate.source, seen);
+  }
+
+  return result;
+}
+
+function collectJsonCandidates(metadata, textScan = []) {
+  const candidates = [];
+  const seen = new Set();
+
+  const addCandidate = (source, value) => {
+    if (!value || typeof value !== "object") return;
+    let signature;
+    try {
+      signature = `${source}:${JSON.stringify(value).slice(0, 10000)}`;
+    } catch {
+      signature = `${source}:${Math.random()}`;
+    }
+    if (seen.has(signature)) return;
+    seen.add(signature);
+    candidates.push({ source, value });
+  };
+
+  for (const [key, value] of Object.entries(metadata || {})) {
+    if (value && typeof value === "object") {
+      addCandidate(key, value);
+      continue;
+    }
+
+    if (typeof value !== "string") continue;
+    const likelyUseful = /\{|\[|Prompt:|Workflow:|generation_data|class_type|KSampler|negativePrompt/i.test(value);
+    if (!likelyUseful) continue;
+
+    for (const parsed of parseJsonFragments(value)) {
+      addCandidate(key, parsed);
+    }
+  }
+
+  for (const [index, text] of (textScan || []).slice(0, 30).entries()) {
+    if (!/\{|\[|Prompt:|Workflow:|generation_data|class_type|KSampler|negativePrompt/i.test(String(text))) continue;
+    for (const parsed of parseJsonFragments(text)) {
+      addCandidate(`textScan ${index + 1}`, parsed);
+    }
+  }
+
+  return candidates;
+}
+
+function parseJsonFragments(text) {
+  const input = String(text || "").trim();
+  const parsedDirect = safeJson(input);
+  if (parsedDirect && typeof parsedDirect === "object") return [parsedDirect];
+
+  const results = [];
+  let index = input.search(/[\{\[]/);
+  while (index >= 0 && index < input.length) {
+    const end = findJsonFragmentEnd(input, index);
+    if (end > index) {
+      const fragment = input.slice(index, end + 1);
+      const parsed = safeJson(fragment);
+      if (parsed && typeof parsed === "object") {
+        results.push(parsed);
+        index = end + 1;
+      } else {
+        index += 1;
+      }
+    } else {
+      index += 1;
+    }
+
+    const nextRelative = input.slice(index).search(/[\{\[]/);
+    if (nextRelative < 0) break;
+    index += nextRelative;
+  }
+
+  return results;
+}
+
+function findJsonFragmentEnd(text, start) {
+  const stack = [];
+  let inString = false;
+  let escape = false;
+
+  for (let i = start; i < text.length; i++) {
+    const char = text[i];
+
+    if (inString) {
+      if (escape) {
+        escape = false;
+      } else if (char === "\\") {
+        escape = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") stack.push("}");
+    else if (char === "[") stack.push("]");
+    else if (char === "}" || char === "]") {
+      if (stack.length && stack[stack.length - 1] === char) {
+        stack.pop();
+        if (!stack.length) return i;
+      } else {
+        return -1;
+      }
+    }
+  }
+
+  return -1;
+}
+
+function findGenerationData(value, depth = 0) {
+  if (!value || typeof value !== "object" || depth > 5) return null;
+  if (value.generation_data && typeof value.generation_data === "object") return value.generation_data;
+  if (value.generationData && typeof value.generationData === "object") return value.generationData;
+
+  for (const child of Object.values(value)) {
+    if (child && typeof child === "object") {
+      const found = findGenerationData(child, depth + 1);
+      if (found) return found;
+    }
+  }
+
+  return null;
+}
+
+function sanitizeGenerationData(data) {
+  const modelKeys = ["label", "type", "modelId", "modelFileId", "weight", "modelFileName", "baseModel", "baseModelType"];
+  const baseModelKeys = ["label", "type", "modelId", "modelFileId", "modelFileName", "baseModel", "baseModelType"];
+  const imageSettingKeys = ["width", "height", "imageCount", "samplerName", "steps", "cfgScale", "seed", "clipSkip"];
+  const highResKeys = [
+    "enableHr", "hrUpscaler", "hrSecondPassSteps", "hrResizeX", "hrResizeY",
+    "denoisingStrength", "sdVae", "sdxl", "ksamplerName", "schedule", "guidance",
+  ];
+
+  const imageSettings = pickFields(data, imageSettingKeys);
+  if (data.baseModel && typeof data.baseModel === "object") {
+    imageSettings.baseModel = pickFields(data.baseModel, baseModelKeys);
+  }
+
+  return {
+    models: Array.isArray(data.models) ? data.models.map((item) => pickFields(item, modelKeys)).filter((item) => Object.keys(item).length) : [],
+    prompt: data.prompt || "",
+    negativePrompt: data.negativePrompt || data.negative_prompt || "",
+    imageSettings,
+    highRes: pickFields(data, highResKeys),
+  };
+}
+
+function collectRequestedComfyNodes(value, result, source, seen, depth = 0) {
+  if (!value || typeof value !== "object" || depth > 6) return;
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectRequestedComfyNodes(item, result, source, seen, depth + 1);
+    return;
+  }
+
+  if (looksLikeComfyPromptGraph(value)) {
+    for (const [nodeId, node] of Object.entries(value)) {
+      addRequestedNode(nodeId, node, result, source, seen);
+    }
+  }
+
+  for (const key of ["prompt", "workflow", "Prompt", "Workflow"]) {
+    const child = value[key];
+    if (typeof child === "string") {
+      for (const parsed of parseJsonFragments(child)) {
+        collectRequestedComfyNodes(parsed, result, `${source}.${key}`, seen, depth + 1);
+      }
+    } else if (child && typeof child === "object") {
+      collectRequestedComfyNodes(child, result, `${source}.${key}`, seen, depth + 1);
+    }
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    if (["generation_data", "generationData", "models", "baseModel"].includes(key)) continue;
+    if (child && typeof child === "object") {
+      collectRequestedComfyNodes(child, result, `${source}.${key}`, seen, depth + 1);
+    }
+  }
+}
+
+function looksLikeComfyPromptGraph(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.values(value).some((node) => node && typeof node === "object" && typeof node.class_type === "string" && node.inputs && typeof node.inputs === "object");
+}
+
+function addRequestedNode(nodeId, node, result, source, seen) {
+  const classType = node?.class_type;
+  const inputs = node?.inputs || {};
+
+  const targets = {
+    KSampler: {
+      output: result.ksamplers,
+      keys: ["cfg", "denoise", "ensd", "sampler_name", "scheduler", "seed", "seed_mode", "steps"],
+    },
+    UpscaleModelLoader: {
+      output: result.upscaleModelLoaders,
+      keys: ["model_name"],
+    },
+    ImageScale: {
+      output: result.imageScales,
+      keys: ["crop", "height", "image", "upscale_method", "width"],
+    },
+  };
+
+  const target = targets[classType];
+  if (!target) return;
+
+  const selectedInputs = pickFields(inputs, target.keys);
+  const item = {
+    node: String(nodeId),
+    class_type: classType,
+    inputs: selectedInputs,
+    source,
+  };
+
+  const signature = `${nodeId}:${classType}:${JSON.stringify(selectedInputs)}`;
+  if (seen[classType].has(signature)) return;
+  seen[classType].add(signature);
+  target.output.push(item);
+}
+
+function pickFields(object, keys) {
+  const output = {};
+  if (!object || typeof object !== "object") return output;
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(object, key) && object[key] !== undefined && object[key] !== null && object[key] !== "") {
+      output[key] = object[key];
+    }
+  }
+  return output;
 }
 
 function findLikelySdParameters(text) {
@@ -723,62 +987,86 @@ function renderError(result, file) {
 
 function renderSummary(container, result) {
   const summary = result.summary || {};
+  const requested = summary.requested || {};
   const blocks = [];
 
   if (result.warnings?.length) {
     blocks.push(infoBox("注意", result.warnings.join("\n")));
   }
 
-  if (summary.sdWebui) {
+  if (requested.ksamplers?.length) {
+    blocks.push(requestedNodeBox("KSampler", requested.ksamplers));
+  }
+
+  if (requested.upscaleModelLoaders?.length) {
+    blocks.push(requestedNodeBox("UpscaleModelLoader", requested.upscaleModelLoaders));
+  }
+
+  if (requested.imageScales?.length) {
+    blocks.push(requestedNodeBox("ImageScale", requested.imageScales));
+  }
+
+  if (requested.generationData) {
+    const gd = requested.generationData;
+
+    if (gd.models?.length) {
+      blocks.push(modelListBox("generation_data · models", gd.models));
+    }
+
+    blocks.push(infoBox("Prompt", gd.prompt || "沒有找到"));
+    blocks.push(infoBox("Negative Prompt", gd.negativePrompt || "沒有找到"));
+    blocks.push(settingsBox("generation_data · image settings", gd.imageSettings));
+
+    if (Object.keys(gd.highRes || {}).length) {
+      blocks.push(settingsBox("generation_data · high-res / advanced", gd.highRes));
+    }
+  }
+
+  if (!requestedHasData(requested) && summary.sdWebui) {
     const sd = summary.sdWebui;
     blocks.push(infoBox("Positive Prompt", sd.prompt || "沒有找到"));
     blocks.push(infoBox("Negative Prompt", sd.negativePrompt || "沒有找到"));
     blocks.push(settingsBox("Generation Settings", sd.settings));
-
-    if (sd.raw && (!sd.prompt && !Object.keys(sd.settings).length)) {
-      blocks.push(infoBox("Raw parameters", sd.raw));
-    }
-  }
-
-  if (summary.comfyui) {
-    const comfy = summary.comfyui;
-
-    if (comfy.textPrompts.length) {
-      blocks.push(listBox("ComfyUI Text Prompts", comfy.textPrompts.map((item) =>
-        `Node ${item.node} · ${item.type}\n${item.text}`
-      )));
-    }
-
-    if (comfy.samplers.length) {
-      blocks.push(listBox("ComfyUI Samplers", comfy.samplers.map((item) =>
-        Object.entries(item)
-          .filter(([, value]) => value !== undefined && value !== null && value !== "")
-          .map(([key, value]) => `${key}: ${value}`)
-          .join("\n")
-      )));
-    }
-
-    if (comfy.models.length) {
-      blocks.push(listBox("ComfyUI Models / LoRA / VAE", comfy.models.map((item) =>
-        `Node ${item.node} · ${item.type}\n${item.key}: ${item.value}`
-      )));
-    }
-
-    if (!comfy.textPrompts.length && !comfy.samplers.length && !comfy.models.length) {
-      blocks.push(infoBox("ComfyUI", "找到 prompt / workflow metadata，但未能自動整理。請查看 Raw metadata 或 JSON。"));
-    }
-  }
-
-  const general = summary.general || {};
-  if (Object.keys(general).length) {
-    blocks.push(settingsBox("General Metadata", general));
   }
 
   if (!blocks.length) {
-    blocks.push(infoBox("沒有找到常見 AI metadata", "可以查看 Raw metadata 或 JSON。某些圖片在壓縮、截圖、社交平台上傳後，metadata 可能已被移除。"));
+    blocks.push(infoBox("沒有找到指定 metadata 類別", "整理結果只會提取 KSampler、UpscaleModelLoader、ImageScale、generation_data models、prompt、negativePrompt 和主要生成設定。完整內容可查看 Raw metadata 或 JSON。"));
   }
 
   container.innerHTML = `<div class="summary-grid">${blocks.join("")}</div>`;
+}
+
+function requestedNodeBox(title, items) {
+  return `
+    <section class="info-box">
+      <h4>${escapeHtml(title)}</h4>
+      ${items.map((item) => `
+        <div class="value-block">${escapeHtml([
+          `node: ${item.node}`,
+          `class_type: ${item.class_type}`,
+          ...objectToLines(item.inputs),
+        ].join("\n"))}</div>
+      `).join("")}
+    </section>
+  `;
+}
+
+function modelListBox(title, models) {
+  return `
+    <section class="info-box">
+      <h4>${escapeHtml(title)}</h4>
+      ${models.map((model, index) => `
+        <div class="value-block">${escapeHtml([
+          `model ${index + 1}`,
+          ...objectToLines(model),
+        ].join("\n"))}</div>
+      `).join("")}
+    </section>
+  `;
+}
+
+function objectToLines(object = {}) {
+  return Object.entries(object).map(([key, value]) => `${key}: ${formatSettingValue(value)}`);
 }
 
 function infoBox(title, value) {
@@ -810,13 +1098,18 @@ function settingsBox(title, settings) {
           ${entries.map(([key, value]) => `
             <tr>
               <th>${escapeHtml(key)}</th>
-              <td>${escapeHtml(String(value))}</td>
+              <td>${escapeHtml(formatSettingValue(value))}</td>
             </tr>
           `).join("")}
         </tbody>
       </table>
     </section>
   `;
+}
+
+function formatSettingValue(value) {
+  if (value && typeof value === "object") return JSON.stringify(value, null, 2);
+  return String(value);
 }
 
 function renderRaw(container, metadata, result) {

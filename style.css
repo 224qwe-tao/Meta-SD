@@ -367,6 +367,19 @@ pre {
   color: var(--accent);
 }
 
+
+.guide h2,
+.guide h3,
+.guide p {
+  font-size: 1rem;
+  line-height: 1.7;
+}
+
+.guide h2,
+.guide h3 {
+  margin-bottom: 0.65rem;
+}
+
 .guide-grid {
   display: grid;
   gap: 1rem;

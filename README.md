@@ -9,17 +9,13 @@
 - PNG 支援 `tEXt`、`iTXt`、`zTXt` metadata chunk
 - 讀取 SD WebUI 常見 `parameters`
 - 讀取 ComfyUI 常見 `prompt` 和 `workflow`
-- 自動整理：
-  - Positive prompt
-  - Negative prompt
-  - Steps
-  - Sampler
-  - Seed
-  - CFG scale
-  - Model
-  - ComfyUI text prompt nodes
-  - ComfyUI sampler nodes
-  - Checkpoint / LoRA / VAE 名稱
+- 整理結果會重點提取：
+  - ComfyUI `KSampler` 的 `cfg`、`denoise`、`ensd`、`sampler_name`、`scheduler`、`seed`、`seed_mode`、`steps`
+  - ComfyUI `UpscaleModelLoader` 的 `model_name`
+  - ComfyUI `ImageScale` 的 `crop`、`height`、`image`、`upscale_method`、`width`
+  - `generation_data.models` 內的 LoRA / base model 主要資料
+  - `prompt`、`negativePrompt`
+  - `width`、`height`、`samplerName`、`steps`、`cfgScale`、`seed`、`clipSkip`、high-res settings 等
 - 可複製 metadata
 - 可下載 JSON
 - 全部在瀏覽器本地處理，不會把圖片上傳到伺服器
@@ -53,4 +49,5 @@ PNG metadata 最完整。JPG / WebP 的 metadata 會受保存方式影響，有�
 ## 介面更新
 
 - 固定淺色主題，移除主題切換按鈕。
-- 縮小首頁標題文字，適合 GitHub Pages 預覽。
+- 縮小首頁標題文字和「可讀取的常見資料」方塊文字，適合 GitHub Pages 預覽。
+- 「整理結果」改為只顯示主要生成 metadata，不再把完整 EXIF.UserComment 當成一般資料塞入整理區。
