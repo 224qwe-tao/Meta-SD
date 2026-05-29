@@ -72,6 +72,11 @@ button.danger {
   box-shadow: var(--shadow);
 }
 
+.hero > div {
+  width: 100%;
+  min-width: 0;
+}
+
 .eyebrow {
   color: var(--accent);
   font-weight: 800;
@@ -88,18 +93,19 @@ p {
 }
 
 h1 {
-  font-size: clamp(1.8rem, 3.7vw, 3.1rem);
-  line-height: 1.08;
-  margin-bottom: 0.9rem;
-  max-width: 920px;
+  font-size: 1rem;
+  line-height: 1.7;
+  margin-bottom: 0.35rem;
+  max-width: none;
 }
 
 .subtitle {
-  max-width: 760px;
+  max-width: none;
   color: var(--muted);
   font-size: 1rem;
   line-height: 1.7;
   margin-bottom: 0;
+  white-space: nowrap;
 }
 
 .hero-actions,
@@ -383,6 +389,10 @@ code {
   .hero,
   .toolbar {
     flex-direction: column;
+  }
+
+  .subtitle {
+    white-space: normal;
   }
 
   .hero {
