@@ -988,52 +988,302 @@ function renderError(result, file) {
 function renderSummary(container, result) {
   const summary = result.summary || {};
   const requested = summary.requested || {};
-  const blocks = [];
+  const copySnippets = [];
+
+  const addCopyButton = (label, text) => {
+    const index = copySnippets.push(text || "") - 1;
+    return `<button type="button" class="mini-copy" data-summary-copy="${index}">${escapeHtml(label)}</button>`;
+  };
+
+  const sections = [];
 
   if (result.warnings?.length) {
-    blocks.push(infoBox("注意", result.warnings.join("\n")));
+    sections.push(`
+      <section class="summary-section warning-section">
+        <div class="summary-section-head">
+          <h4>注意</h4>
+        </div>
+        <div class="friendly-note">${escapeHtml(result.warnings.join("\n"))}</div>
+      </section>
+    `);
   }
 
-  if (requested.ksamplers?.length) {
-    blocks.push(requestedNodeBox("KSampler", requested.ksamplers));
-  }
+  if (requestedHasData(requested)) {
+    const gd = requested.generationData || {};
+    const quickItems = buildQuickSettingItems(requested);
+    const quickText = quickItems.map((item) => `${item.label}: ${item.value}`).join("\n");
 
-  if (requested.upscaleModelLoaders?.length) {
-    blocks.push(requestedNodeBox("UpscaleModelLoader", requested.upscaleModelLoaders));
-  }
+    if (quickItems.length) {
+      sections.push(`
+        <section class="summary-section summary-overview">
+          <div class="summary-section-head">
+            <div>
+              <span class="section-kicker">Overview</span>
+              <h4>核心生成設定</h4>
+            </div>
+            <div class="section-actions">${addCopyButton("複製核心設定", quickText)}</div>
+          </div>
+          <div class="quick-grid">
+            ${quickItems.map((item) => `
+              <div class="quick-item ${item.important ? "important" : ""}">
+                <span>${escapeHtml(item.label)}</span>
+                <strong>${escapeHtml(item.value)}</strong>
+              </div>
+            `).join("")}
+          </div>
+        </section>
+      `);
+    }
 
-  if (requested.imageScales?.length) {
-    blocks.push(requestedNodeBox("ImageScale", requested.imageScales));
-  }
+    if (gd.prompt || gd.negativePrompt) {
+      const promptCopyText = [
+        gd.prompt ? `Prompt:\n${gd.prompt}` : "",
+        gd.negativePrompt ? `Negative Prompt:\n${gd.negativePrompt}` : "",
+      ].filter(Boolean).join("\n\n");
 
-  if (requested.generationData) {
-    const gd = requested.generationData;
+      sections.push(`
+        <section class="summary-section prompt-section">
+          <div class="summary-section-head">
+            <div>
+              <span class="section-kicker">Prompt</span>
+              <h4>Prompt / Negative Prompt</h4>
+            </div>
+            <div class="section-actions">${addCopyButton("複製 Prompt", promptCopyText)}</div>
+          </div>
+          <div class="prompt-grid">
+            ${promptPanel("Prompt", gd.prompt || "沒有找到", addCopyButton("複製", gd.prompt || ""))}
+            ${promptPanel("Negative Prompt", gd.negativePrompt || "沒有找到", addCopyButton("複製", gd.negativePrompt || ""))}
+          </div>
+        </section>
+      `);
+    }
 
     if (gd.models?.length) {
-      blocks.push(modelListBox("generation_data · models", gd.models));
+      sections.push(`
+        <section class="summary-section models-section">
+          <div class="summary-section-head">
+            <div>
+              <span class="section-kicker">Models</span>
+              <h4>LoRA / Model 清單</h4>
+            </div>
+            <div class="section-actions">${addCopyButton("複製模型清單", modelsToText(gd.models))}</div>
+          </div>
+          <div class="model-grid">
+            ${gd.models.map((model, index) => modelCard(model, index)).join("")}
+          </div>
+        </section>
+      `);
     }
 
-    blocks.push(infoBox("Prompt", gd.prompt || "沒有找到"));
-    blocks.push(infoBox("Negative Prompt", gd.negativePrompt || "沒有找到"));
-    blocks.push(settingsBox("generation_data · image settings", gd.imageSettings));
+    const nodeGroups = [
+      ["KSampler", requested.ksamplers || []],
+      ["UpscaleModelLoader", requested.upscaleModelLoaders || []],
+      ["ImageScale", requested.imageScales || []],
+    ].filter(([, items]) => items.length);
 
-    if (Object.keys(gd.highRes || {}).length) {
-      blocks.push(settingsBox("generation_data · high-res / advanced", gd.highRes));
+    if (nodeGroups.length) {
+      sections.push(`
+        <section class="summary-section nodes-section">
+          <div class="summary-section-head">
+            <div>
+              <span class="section-kicker">ComfyUI Nodes</span>
+              <h4>ComfyUI 重點節點</h4>
+            </div>
+            <div class="section-actions">${addCopyButton("複製節點", nodeGroupsToText(nodeGroups))}</div>
+          </div>
+          <div class="node-group-list">
+            ${nodeGroups.map(([title, items]) => `
+              <div class="node-group">
+                <div class="node-group-title">${escapeHtml(title)} <span>${items.length}</span></div>
+                <div class="node-card-grid">
+                  ${items.map((item) => nodeCard(item)).join("")}
+                </div>
+              </div>
+            `).join("")}
+          </div>
+        </section>
+      `);
     }
-  }
-
-  if (!requestedHasData(requested) && summary.sdWebui) {
+  } else if (summary.sdWebui) {
     const sd = summary.sdWebui;
-    blocks.push(infoBox("Positive Prompt", sd.prompt || "沒有找到"));
-    blocks.push(infoBox("Negative Prompt", sd.negativePrompt || "沒有找到"));
-    blocks.push(settingsBox("Generation Settings", sd.settings));
+    const sdSettings = Object.entries(sd.settings || {}).map(([label, value]) => ({ label, value: formatSettingValue(value), important: /steps|sampler|cfg|seed|model/i.test(label) }));
+
+    sections.push(`
+      <section class="summary-section summary-overview">
+        <div class="summary-section-head">
+          <div>
+            <span class="section-kicker">Stable Diffusion WebUI / Forge</span>
+            <h4>核心生成設定</h4>
+          </div>
+          <div class="section-actions">${addCopyButton("複製設定", sdSettings.map((item) => `${item.label}: ${item.value}`).join("\n"))}</div>
+        </div>
+        <div class="quick-grid">
+          ${sdSettings.map((item) => `
+            <div class="quick-item ${item.important ? "important" : ""}">
+              <span>${escapeHtml(item.label)}</span>
+              <strong>${escapeHtml(item.value)}</strong>
+            </div>
+          `).join("")}
+        </div>
+      </section>
+      <section class="summary-section prompt-section">
+        <div class="summary-section-head">
+          <div>
+            <span class="section-kicker">Prompt</span>
+            <h4>Prompt / Negative Prompt</h4>
+          </div>
+          <div class="section-actions">${addCopyButton("複製 Prompt", [`Prompt:\n${sd.prompt || ""}`, `Negative Prompt:\n${sd.negativePrompt || ""}`].join("\n\n"))}</div>
+        </div>
+        <div class="prompt-grid">
+          ${promptPanel("Positive Prompt", sd.prompt || "沒有找到", addCopyButton("複製", sd.prompt || ""))}
+          ${promptPanel("Negative Prompt", sd.negativePrompt || "沒有找到", addCopyButton("複製", sd.negativePrompt || ""))}
+        </div>
+      </section>
+    `);
   }
 
-  if (!blocks.length) {
-    blocks.push(infoBox("沒有找到指定 metadata 類別", "整理結果只會提取 KSampler、UpscaleModelLoader、ImageScale、generation_data models、prompt、negativePrompt 和主要生成設定。完整內容可查看 Raw metadata 或 JSON。"));
+  if (!sections.length) {
+    sections.push(`
+      <section class="summary-section empty-summary">
+        <div class="empty-icon">⌕</div>
+        <h4>沒有找到指定 metadata 類別</h4>
+        <p>整理結果只會提取 KSampler、UpscaleModelLoader、ImageScale、generation_data models、prompt、negativePrompt 和主要生成設定。完整內容可查看 Raw metadata 或 JSON。</p>
+      </section>
+    `);
   }
 
-  container.innerHTML = `<div class="summary-grid">${blocks.join("")}</div>`;
+  container.innerHTML = `<div class="pretty-summary">${sections.join("")}</div>`;
+
+  container.querySelectorAll("[data-summary-copy]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const text = copySnippets[Number(button.dataset.summaryCopy)] || "";
+      await copyText(text);
+      setStatus("已複製整理結果內容。");
+    });
+  });
+}
+
+function buildQuickSettingItems(requested = {}) {
+  const gd = requested.generationData || {};
+  const image = gd.imageSettings || {};
+  const highRes = gd.highRes || {};
+  const firstKSampler = requested.ksamplers?.[0]?.inputs || {};
+  const firstScale = requested.imageScales?.[0]?.inputs || {};
+  const firstUpscaler = requested.upscaleModelLoaders?.[0]?.inputs || {};
+  const baseModel = image.baseModel || {};
+  const size = valueOrJoin(" × ", image.width || firstScale.width, image.height || firstScale.height);
+  const sampler = image.samplerName || valueOrJoin(" / ", image.ksamplerName || firstKSampler.sampler_name, image.schedule || firstKSampler.scheduler);
+  const hrResize = valueOrJoin(" × ", highRes.hrResizeX, highRes.hrResizeY);
+
+  const items = [];
+  addQuickItem(items, "Size", size, true);
+  addQuickItem(items, "Sampler", sampler, true);
+  addQuickItem(items, "Steps", image.steps ?? firstKSampler.steps, true);
+  addQuickItem(items, "CFG", image.cfgScale ?? firstKSampler.cfg, true);
+  addQuickItem(items, "Seed", image.seed ?? firstKSampler.seed, true);
+  addQuickItem(items, "Clip Skip", image.clipSkip);
+  addQuickItem(items, "Image Count", image.imageCount);
+  addQuickItem(items, "Base Model", baseModel.modelFileName || baseModel.label || baseModel.baseModel);
+  addQuickItem(items, "Base Type", baseModel.baseModelType);
+  addQuickItem(items, "High-res", formatBool(highRes.enableHr));
+  addQuickItem(items, "HR Upscaler", highRes.hrUpscaler || firstUpscaler.model_name);
+  addQuickItem(items, "HR Steps", highRes.hrSecondPassSteps);
+  addQuickItem(items, "HR Resize", hrResize);
+  addQuickItem(items, "Denoise", highRes.denoisingStrength ?? firstKSampler.denoise);
+  addQuickItem(items, "Guidance", highRes.guidance);
+  addQuickItem(items, "VAE", highRes.sdVae);
+
+  return items;
+}
+
+function addQuickItem(items, label, value, important = false) {
+  if (value === undefined || value === null || value === "") return;
+  items.push({ label, value: formatSettingValue(value), important });
+}
+
+function valueOrJoin(separator, ...values) {
+  const clean = values.filter((value) => value !== undefined && value !== null && value !== "").map((value) => String(value));
+  return clean.length ? clean.join(separator) : "";
+}
+
+function formatBool(value) {
+  if (value === true) return "True";
+  if (value === false) return "False";
+  return value;
+}
+
+function promptPanel(title, text, copyButtonHtml) {
+  return `
+    <article class="prompt-card">
+      <div class="prompt-card-head">
+        <h5>${escapeHtml(title)}</h5>
+        ${copyButtonHtml}
+      </div>
+      <pre class="prompt-text">${escapeHtml(text)}</pre>
+    </article>
+  `;
+}
+
+function modelCard(model, index) {
+  const name = model.modelFileName || model.label || `model ${index + 1}`;
+  const rows = [
+    ["label", model.label],
+    ["type", model.type],
+    ["weight", model.weight],
+    ["baseModel", model.baseModel],
+    ["baseModelType", model.baseModelType],
+    ["modelId", model.modelId],
+    ["modelFileId", model.modelFileId],
+  ].filter(([, value]) => value !== undefined && value !== null && value !== "");
+
+  return `
+    <article class="model-card">
+      <div class="model-card-head">
+        <span class="model-index">${index + 1}</span>
+        <strong>${escapeHtml(name)}</strong>
+      </div>
+      <div class="mini-kv">
+        ${rows.map(([key, value]) => `
+          <div><span>${escapeHtml(key)}</span><b>${escapeHtml(formatSettingValue(value))}</b></div>
+        `).join("")}
+      </div>
+    </article>
+  `;
+}
+
+function nodeCard(item) {
+  const rows = Object.entries(item.inputs || {});
+  return `
+    <article class="node-card">
+      <div class="node-card-head">
+        <strong>node ${escapeHtml(item.node)}</strong>
+        <span>${escapeHtml(item.class_type)}</span>
+      </div>
+      <div class="mini-kv">
+        ${rows.map(([key, value]) => `
+          <div><span>${escapeHtml(key)}</span><b>${escapeHtml(formatSettingValue(value))}</b></div>
+        `).join("")}
+      </div>
+    </article>
+  `;
+}
+
+function modelsToText(models = []) {
+  return models.map((model, index) => [
+    `model ${index + 1}`,
+    ...objectToLines(model),
+  ].join("\n")).join("\n\n");
+}
+
+function nodeGroupsToText(groups = []) {
+  return groups.map(([title, items]) => [
+    title,
+    ...items.map((item) => [
+      `node: ${item.node}`,
+      `class_type: ${item.class_type}`,
+      ...objectToLines(item.inputs),
+    ].join("\n")),
+  ].join("\n\n")).join("\n\n---\n\n");
 }
 
 function requestedNodeBox(title, items) {
