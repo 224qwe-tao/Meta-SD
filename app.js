@@ -6,7 +6,6 @@ const statusBox = document.querySelector("#status");
 const copyAllBtn = document.querySelector("#copyAllBtn");
 const downloadAllBtn = document.querySelector("#downloadAllBtn");
 const clearBtn = document.querySelector("#clearBtn");
-const themeBtn = document.querySelector("#themeBtn");
 const template = document.querySelector("#resultTemplate");
 
 let allResults = [];
@@ -14,14 +13,6 @@ let allResults = [];
 const decoderUtf8 = new TextDecoder("utf-8", { fatal: false });
 const decoderLatin1 = new TextDecoder("iso-8859-1", { fatal: false });
 
-themeBtn.addEventListener("click", () => {
-  document.body.classList.toggle("light");
-  localStorage.setItem("theme", document.body.classList.contains("light") ? "light" : "dark");
-});
-
-if (localStorage.getItem("theme") === "light") {
-  document.body.classList.add("light");
-}
 
 dropZone.addEventListener("click", () => fileInput.click());
 dropZone.addEventListener("keydown", (event) => {

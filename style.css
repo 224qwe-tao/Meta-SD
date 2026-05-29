@@ -1,21 +1,4 @@
 :root {
-  color-scheme: dark;
-  --bg: #0f1220;
-  --panel: rgba(255, 255, 255, 0.07);
-  --panel-strong: rgba(255, 255, 255, 0.12);
-  --text: #f4f7fb;
-  --muted: #aab3c5;
-  --line: rgba(255, 255, 255, 0.14);
-  --accent: #8db7ff;
-  --accent-strong: #65a0ff;
-  --danger: #ff6b6b;
-  --shadow: 0 20px 70px rgba(0, 0, 0, 0.35);
-  --radius: 22px;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-
-body.light {
   color-scheme: light;
   --bg: #f6f8fc;
   --panel: rgba(255, 255, 255, 0.86);
@@ -27,6 +10,9 @@ body.light {
   --accent-strong: #235fdb;
   --danger: #d83b3b;
   --shadow: 0 20px 60px rgba(31, 54, 91, 0.14);
+  --radius: 22px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 * {
@@ -102,16 +88,17 @@ p {
 }
 
 h1 {
-  font-size: clamp(2.2rem, 5vw, 4rem);
-  line-height: 1;
-  margin-bottom: 1rem;
+  font-size: clamp(1.8rem, 3.7vw, 3.1rem);
+  line-height: 1.08;
+  margin-bottom: 0.9rem;
+  max-width: 920px;
 }
 
 .subtitle {
   max-width: 760px;
   color: var(--muted);
-  font-size: 1.1rem;
-  line-height: 1.75;
+  font-size: 1rem;
+  line-height: 1.7;
   margin-bottom: 0;
 }
 
@@ -313,8 +300,8 @@ pre {
   overflow: auto;
 }
 
-body.light .value-block,
-body.light pre {
+.value-block,
+pre {
   background: rgba(23, 32, 51, 0.04);
 }
 
